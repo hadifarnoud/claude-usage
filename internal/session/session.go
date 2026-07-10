@@ -63,6 +63,7 @@ type Session struct {
 	Path       string
 	SessionID  string
 	Title      string
+	FirstPrompt string
 	Project    string
 	GitBranch  string
 	Cwd        string
@@ -207,8 +208,13 @@ func (s *Session) absorb(l Line) {
 		// The AI-generated title (ai-title line) is the concise, human-readable
 		// session name Claude Code shows in its UI. Prefer it over the raw first
 		// prompt; only fall back to the prompt when no ai-title is present.
-		if s.Title == "" {
-			if prompt := extractUserPrompt(l); prompt != "" {
+		if prompt := extractUserPrompt(l); prompt != "" {
+			// Always keep the first user prompt for the detail view, even when
+			// an ai-title later overrides the session Title.
+			if s.FirstPrompt == "" {
+				s.FirstPrompt = prompt
+			}
+			if s.Title == "" {
 				s.Title = prompt
 			}
 		}

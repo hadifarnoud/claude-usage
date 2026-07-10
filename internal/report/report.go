@@ -25,6 +25,7 @@ type ModelRow struct {
 type SessionReport struct {
 	SessionID      string
 	Title          string
+	FirstPrompt    string
 	Project        string
 	GitBranch      string
 	Cwd            string
@@ -48,6 +49,7 @@ func FromSession(s *session.Session) SessionReport {
 	r := SessionReport{
 		SessionID:      s.SessionID,
 		Title:          s.Title,
+		FirstPrompt:    s.FirstPrompt,
 		Project:        s.Project,
 		GitBranch:      s.GitBranch,
 		Cwd:            s.Cwd,

@@ -331,6 +331,36 @@ func truncForCell(s string, n int) string {
 	return s[:n-1] + "\u2026"
 }
 
+// wrapText word-wraps s into lines no longer than width, preserving leading
+// spaces on continuation lines. It splits on any whitespace.
+func wrapText(s string, width int) []string {
+	words := strings.Fields(s)
+	if len(words) == 0 {
+		return nil
+	}
+	var lines []string
+	var cur strings.Builder
+	for _, w := range words {
+		if cur.Len() == 0 {
+			cur.WriteString(w)
+			continue
+		}
+		// +1 for the space between words
+		if cur.Len()+1+len(w) <= width {
+			cur.WriteByte(' ')
+			cur.WriteString(w)
+		} else {
+			lines = append(lines, cur.String())
+			cur.Reset()
+			cur.WriteString(w)
+		}
+	}
+	if cur.Len() > 0 {
+		lines = append(lines, cur.String())
+	}
+	return lines
+}
+
 // Init starts the program.
 func (m Model) Init() tea.Cmd {
 	cmds := []tea.Cmd{m.spinner.Tick}
@@ -578,6 +608,12 @@ func (m *Model) buildDetailText() {
 		title = "(untitled)"
 	}
 	fmt.Fprintf(&b, "  Title:      %s\n", truncForCell(title, 80))
+	if r.FirstPrompt != "" && r.FirstPrompt != title {
+		fmt.Fprintf(&b, "  %s\n", m.accentStyle.Render("  First prompt:"))
+		for _, line := range wrapText(r.FirstPrompt, 76) {
+			fmt.Fprintf(&b, "    %s\n", line)
+		}
+	}
 	fmt.Fprintf(&b, "  Session ID: %s\n", r.SessionID)
 	fmt.Fprintf(&b, "  Project:    %s\n", r.Project)
 	if r.GitBranch != "" {
