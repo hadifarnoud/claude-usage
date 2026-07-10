@@ -54,6 +54,7 @@ type Line struct {
 	Summary     string          `json:"summary"`
 	LeafUUID    string          `json:"leafUuid"`
 	LastPrompt  string          `json:"lastPrompt"`
+	AITitle     string          `json:"aiTitle"`
 	Content     json.RawMessage `json:"content"`
 }
 
@@ -203,10 +204,19 @@ func (s *Session) absorb(l Line) {
 		s.ServerTool.WebFetchRequests += l.Message.ServerTool.WebFetchRequests
 	case "user":
 		s.UserTurns++
+		// The AI-generated title (ai-title line) is the concise, human-readable
+		// session name Claude Code shows in its UI. Prefer it over the raw first
+		// prompt; only fall back to the prompt when no ai-title is present.
 		if s.Title == "" {
 			if prompt := extractUserPrompt(l); prompt != "" {
 				s.Title = prompt
 			}
+		}
+	case "ai-title":
+		// Claude Code writes ai-title lines as a session evolves; keep the most
+		// recent non-empty one so the title reflects the latest name.
+		if t := strings.TrimSpace(l.AITitle); t != "" {
+			s.Title = t
 		}
 	case "last-prompt":
 		if s.Title == "" && l.LastPrompt != "" {

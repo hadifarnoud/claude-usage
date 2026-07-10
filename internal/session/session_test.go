@@ -92,3 +92,34 @@ func TestCleanTitle(t *testing.T) {
 		t.Errorf("cleanTitle = %q", got)
 	}
 }
+
+func TestAITitlePreferredOverPrompt(t *testing.T) {
+	// The user prompt appears first, then Claude writes an ai-title line.
+	// The concise ai-title should win over the raw prompt.
+	transcript := `{"type":"user","sessionId":"x","timestamp":"2026-01-01T10:00:00Z","message":{"role":"user","content":"Hestudio is a small startup studio. we want to redesign the site"}}
+{"type":"assistant","sessionId":"x","timestamp":"2026-01-01T10:00:05Z","message":{"model":"claude-sonnet-5","role":"assistant","usage":{"input_tokens":100,"output_tokens":50}}}
+{"type":"ai-title","sessionId":"x","aiTitle":"Implement Hestudio Redesign"}
+{"type":"ai-title","sessionId":"x","aiTitle":"Implement Hestudio Redesign design file"}
+`
+	s, err := Parse("t.jsonl", "/root", strings.NewReader(transcript))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Title != "Implement Hestudio Redesign design file" {
+		t.Errorf("Title = %q, want the latest ai-title \"Implement Hestudio Redesign design file\"", s.Title)
+	}
+}
+
+func TestPromptFallbackWhenNoAITitle(t *testing.T) {
+	// No ai-title line: fall back to the first user prompt.
+	transcript := `{"type":"user","sessionId":"x","message":{"role":"user","content":"just a prompt"}}
+{"type":"assistant","sessionId":"x","message":{"model":"claude-sonnet-5","role":"assistant","usage":{"input_tokens":10,"output_tokens":5}}}
+`
+	s, err := Parse("t.jsonl", "/root", strings.NewReader(transcript))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Title != "just a prompt" {
+		t.Errorf("Title = %q, want \"just a prompt\"", s.Title)
+	}
+}
