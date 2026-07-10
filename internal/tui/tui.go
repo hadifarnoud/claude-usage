@@ -41,6 +41,53 @@ func (v View) String() string {
 
 var views = []View{ViewSessions, ViewModels, ViewProjects, ViewByDay}
 
+// sortMode controls how the sessions table is ordered.
+type sortMode int
+
+const (
+	sortByCost sortMode = iota
+	sortByTime
+)
+
+func (s sortMode) String() string {
+	if s == sortByTime {
+		return "time"
+	}
+	return "cost"
+}
+
+// timeFilter limits sessions to a recent activity window.
+type timeFilter int
+
+const (
+	filterAll timeFilter = iota
+	filter24h
+	filter7d
+)
+
+func (f timeFilter) String() string {
+	switch f {
+	case filter24h:
+		return "24h"
+	case filter7d:
+		return "7d"
+	default:
+		return "all"
+	}
+}
+
+// Window returns the filter duration; 0 means no limit.
+func (f timeFilter) Window() time.Duration {
+	switch f {
+	case filter24h:
+		return 24 * time.Hour
+	case filter7d:
+		return 7 * 24 * time.Hour
+	default:
+		return 0
+	}
+}
+
 // refreshResult carries freshly parsed reports back to the UI.
 type refreshResult struct {
 	reports []report.SessionReport
@@ -70,6 +117,9 @@ type Model struct {
 
 	cursorRow int // preserved across refreshes for sessions table
 
+	sortBy    sortMode   // sessions table ordering: by cost (default) or time
+	timeRange timeFilter // sessions table activity window
+
 	// styles
 	titleStyle    lipgloss.Style
 	subtitleStyle lipgloss.Style
@@ -84,9 +134,7 @@ type Model struct {
 // used for refreshes.
 func New(reports []report.SessionReport, loader func() []report.SessionReport, interval time.Duration) Model {
 	agg := report.NewAggregate()
-	sort.Slice(reports, func(i, j int) bool {
-		return reports[i].TotalCost.Total > reports[j].TotalCost.Total
-	})
+	sortSessions(reports, sortByCost)
 	for i := range reports {
 		agg.Add(reports[i])
 	}
@@ -139,7 +187,10 @@ func newBaseTable(cols []table.Column) table.Model {
 	s.Header = s.Header.BorderStyle(lipgloss.NormalBorder()).BorderForeground(lipgloss.Color("#334155")).
 		Bold(true).Foreground(lipgloss.Color("#CBD5E1"))
 	s.Selected = s.Selected.Foreground(lipgloss.Color("#0F172A")).Background(lipgloss.Color("#7DD3FC")).Bold(true)
-	s.Cell = s.Cell.Foreground(lipgloss.Color("#E2E8F0"))
+	// Leave Cell.Foreground unset so the Selected style's dark foreground can
+	// override it; setting a cell foreground here would win over Selected and
+	// make the highlighted row unreadable (light text on light background).
+	s.Cell = s.Cell.Padding(0, 1)
 	t.SetStyles(s)
 	return t
 }
@@ -156,8 +207,9 @@ func (m *Model) buildSessionsTable() table.Model {
 		{Title: "Date", Width: 12},
 	}
 	t := newBaseTable(cols)
-	rows := make([]table.Row, 0, len(m.reports))
-	for _, r := range m.reports {
+	filtered := m.filteredReports()
+	rows := make([]table.Row, 0, len(filtered))
+	for _, r := range filtered {
 		models := make([]string, 0, len(r.Models))
 		for _, mm := range r.Models {
 			models = append(models, shortenModel(mm.Model))
@@ -304,11 +356,60 @@ func (m Model) doRefresh() tea.Cmd {
 	}
 }
 
+// sortSessions orders reports in place. Sessions without a timestamp sort to
+// the bottom regardless of mode.
+func sortSessions(reports []report.SessionReport, mode sortMode) {
+	sort.SliceStable(reports, func(i, j int) bool {
+		switch mode {
+		case sortByTime:
+			ti, tj := reports[i].LastSeen, reports[j].LastSeen
+			if ti.IsZero() {
+				return false
+			}
+			if tj.IsZero() {
+				return true
+			}
+			return ti.After(tj)
+		default:
+			return reports[i].TotalCost.Total > reports[j].TotalCost.Total
+		}
+	})
+}
+
+// filterByTime returns the subset of reports whose LastSeen falls within the
+// filter window. A zero window returns all reports untouched.
+func filterByTime(reports []report.SessionReport, f timeFilter) []report.SessionReport {
+	w := f.Window()
+	if w == 0 {
+		return reports
+	}
+	cutoff := time.Now().Add(-w)
+	out := make([]report.SessionReport, 0, len(reports))
+	for _, r := range reports {
+		if r.LastSeen.IsZero() || r.LastSeen.Before(cutoff) {
+			continue
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
+// filteredReports returns the current session view with the active time
+// filter applied.
+func (m *Model) filteredReports() []report.SessionReport {
+	return filterByTime(m.reports, m.timeRange)
+}
+
+// rebuildSessions re-sorts the session data and rebuilds only the sessions
+// table, preserving the cursor when possible.
+func (m *Model) rebuildSessions() {
+	sortSessions(m.reports, m.sortBy)
+	m.tables[ViewSessions] = m.buildSessionsTable()
+}
+
 func (m *Model) applyRefresh(res refreshResult) {
 	reports := res.reports
-	sort.Slice(reports, func(i, j int) bool {
-		return reports[i].TotalCost.Total > reports[j].TotalCost.Total
-	})
+	sortSessions(reports, m.sortBy)
 	agg := report.NewAggregate()
 	for i := range reports {
 		agg.Add(reports[i])
@@ -402,12 +503,38 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.active = View(len(views) - 1)
 			}
 			return m, nil
-		case "1", "2", "3", "4":
-			idx := int(msg.String()[0] - '1')
-			if idx < len(views) {
-				m.active = views[idx]
-			}
-			return m, nil
+			case "1", "2", "3", "4":
+				idx := int(msg.String()[0] - '1')
+				if idx < len(views) {
+					m.active = views[idx]
+				}
+				return m, nil
+			case "s":
+				if m.showDetail {
+					return m, nil
+				}
+				if m.sortBy == sortByCost {
+					m.sortBy = sortByTime
+				} else {
+					m.sortBy = sortByCost
+				}
+				m.rebuildSessions()
+				return m, nil
+			case "f":
+				if m.showDetail {
+					return m, nil
+				}
+				switch m.timeRange {
+				case filterAll:
+					m.timeRange = filter24h
+				case filter24h:
+					m.timeRange = filter7d
+				case filter7d:
+					m.timeRange = filterAll
+				}
+				m.cursorRow = 0
+				m.tables[ViewSessions] = m.buildSessionsTable()
+				return m, nil
 		}
 	}
 
@@ -437,12 +564,13 @@ func (m *Model) resizeTables() {
 func (m *Model) buildDetailText() {
 	t := m.tables[ViewSessions]
 	idx := t.Cursor()
-	if idx >= len(m.reports) {
+	filtered := m.filteredReports()
+	if idx >= len(filtered) {
 		m.detailText = "No session selected."
 		m.detail.SetContent(m.detailText)
 		return
 	}
-	r := m.reports[idx]
+	r := filtered[idx]
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s\n\n", m.titleStyle.Render("Session Detail"))
 	title := r.Title
@@ -559,10 +687,13 @@ func (m Model) tabsView() string {
 }
 
 func (m Model) footerView() string {
+	auto := ""
 	if m.interval > 0 {
-		return m.dimStyle.Render("  [tab/1-4] views  [enter] detail  [r] refresh now  [q] quit  \u2014  auto-refresh " + m.interval.String())
+		auto = "  \u2014  auto-refresh " + m.interval.String()
 	}
-	return m.dimStyle.Render("  [tab/1-4] views  [enter] detail  [r] refresh now  [q] quit")
+	return m.dimStyle.Render("  [tab/1-4] views  [s] sort: "+m.sortBy.String()+
+		"  [f] time: "+m.timeRange.String()+
+		"  [enter] detail  [r] refresh now  [q] quit"+auto)
 }
 
 // Run launches the TUI.

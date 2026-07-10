@@ -70,6 +70,8 @@ claude-usage --dir /path/to/projects
 | `1`–`4`     | Jump to view                    |
 | `↑` / `↓`   | Navigate rows                   |
 | `enter`     | Session detail (on Sessions tab) |
+| `s`         | Toggle sort: cost ⇄ time (Sessions) |
+| `f`         | Cycle time filter: all → 24h → 7d → all (Sessions) |
 | `r`         | Refresh now                     |
 | `esc`       | Back / close detail             |
 | `q` / `ctrl+c` | Quit                        |
