@@ -451,6 +451,14 @@ func deriveProject(path, root string) string {
 		// fallback: parent directory name
 		raw = filepath.Base(filepath.Dir(path))
 	}
+	// Collapse git worktrees under their parent repo. Claude stores each
+	// worktree as its own project directory, encoding a cwd like
+	// /Users/foo/Code/bar/.claude/worktrees/x as -Users-foo-Code-bar--claude-worktrees-x.
+	// Strip the --claude-worktrees-* suffix so all worktrees of a repo share
+	// one project identity with the repo's main checkout.
+	if idx := strings.Index(raw, "--claude-worktrees-"); idx >= 0 {
+		raw = raw[:idx]
+	}
 	return decodeProjectName(raw)
 }
 

@@ -65,7 +65,8 @@ func TestDeriveProject(t *testing.T) {
 		path, root, want string
 	}{
 		{"/root/-Users-foo-Code-bar/uuid.jsonl", "/root", "Users/foo/Code/bar"},
-		{"/root/-Users-foo-Code-bar--claude-worktrees-x/uuid.jsonl", "/root", "Users/foo/Code/bar/.claude/worktrees/x"},
+		{"/root/-Users-foo-Code-bar--claude-worktrees-x/uuid.jsonl", "/root", "Users/foo/Code/bar"},
+		{"/root/-Users-foo-Code-bar--claude-worktrees-brave-nobel-52d39f/uuid.jsonl", "/root", "Users/foo/Code/bar"},
 		{"/root/ssh-abc-def/uuid.jsonl", "/root", "ssh-abc-def"},
 		{"/root/-Users-foo-Code-bar/uuid/subagents/a.jsonl", "/root", "Users/foo/Code/bar"},
 	}
