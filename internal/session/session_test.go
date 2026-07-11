@@ -1,6 +1,8 @@
 package session
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -121,5 +123,127 @@ func TestPromptFallbackWhenNoAITitle(t *testing.T) {
 	}
 	if s.Title != "just a prompt" {
 		t.Errorf("Title = %q, want \"just a prompt\"", s.Title)
+	}
+}
+
+func TestSidechainRoutedToSubagent(t *testing.T) {
+	// A sidechain assistant turn must NOT count toward the parent totals; it
+	// lands in the subagent bucket keyed by agentId.
+	transcript := `{"type":"user","sessionId":"s1","timestamp":"2026-01-01T10:00:00Z","message":{"role":"user","content":"hi"}}
+{"type":"assistant","sessionId":"s1","timestamp":"2026-01-01T10:00:05Z","message":{"model":"claude-sonnet-5","role":"assistant","usage":{"input_tokens":100,"output_tokens":50}}}
+{"type":"assistant","sessionId":"s1","timestamp":"2026-01-01T10:00:10Z","isSidechain":true,"agentId":"abc123","message":{"model":"claude-haiku-4-5","role":"assistant","usage":{"input_tokens":1000,"cache_creation_input_tokens":5000,"output_tokens":200}}}
+`
+	s, err := Parse("test.jsonl", "/root", strings.NewReader(transcript))
+	if err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	// parent totals only include the main turn
+	if s.Total.InputTokens != 100 || s.Total.OutputTokens != 50 {
+		t.Errorf("parent total = in %d out %d, want in 100 out 50", s.Total.InputTokens, s.Total.OutputTokens)
+	}
+	if len(s.Subagents) != 1 {
+		t.Fatalf("expected 1 subagent, got %d", len(s.Subagents))
+	}
+	sa := s.Subagents["abc123"]
+	if sa == nil {
+		t.Fatal("subagent abc123 missing")
+	}
+	if sa.Total.InputTokens != 1000 || sa.Total.OutputTokens != 200 || sa.Total.CacheCreationInputTokens != 5000 {
+		t.Errorf("subagent total = %+v", sa.Total)
+	}
+	if sa.AssistantTurns != 1 {
+		t.Errorf("subagent turns = %d, want 1", sa.AssistantTurns)
+	}
+	if len(sa.Models) != 1 || sa.Models["claude-haiku-4-5"] == nil {
+		t.Errorf("subagent models = %+v", sa.Models)
+	}
+}
+
+func TestLoadSubagents(t *testing.T) {
+	// Build a fake projects dir:
+	//   root/-proj/sid.jsonl          (parent)
+	//   root/-proj/sid/subagents/agent-deadbeef.jsonl
+	//   root/-proj/sid/subagents/agent-deadbeef.meta.json
+	dir := t.TempDir()
+	proj := filepath.Join(dir, "-proj")
+	sid := "sid-123"
+	if err := os.MkdirAll(proj, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	parentPath := filepath.Join(proj, sid+".jsonl")
+	parent := `{"type":"user","sessionId":"` + sid + `","message":{"role":"user","content":"do stuff"}}
+{"type":"assistant","sessionId":"` + sid + `","message":{"model":"claude-sonnet-5","role":"assistant","usage":{"input_tokens":10,"output_tokens":5}}}
+`
+	if err := os.WriteFile(parentPath, []byte(parent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	subDir := filepath.Join(proj, sid, "subagents")
+	if err := os.MkdirAll(subDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	agentID := "deadbeef"
+	subJSONL := `{"type":"assistant","sessionId":"` + sid + `","isSidechain":true,"agentId":"` + agentID + `","timestamp":"2026-01-01T10:00:00Z","message":{"model":"claude-haiku-4-5","role":"assistant","usage":{"input_tokens":300,"cache_creation_input_tokens":7000,"output_tokens":80}}}
+{"type":"assistant","sessionId":"` + sid + `","isSidechain":true,"agentId":"` + agentID + `","timestamp":"2026-01-01T10:00:05Z","message":{"model":"claude-haiku-4-5","role":"assistant","usage":{"input_tokens":200,"output_tokens":40}}}
+`
+	if err := os.WriteFile(filepath.Join(subDir, "agent-"+agentID+".jsonl"), []byte(subJSONL), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	meta := `{"agentType":"Explore","description":"find the config file","toolUseId":"toolu_x","spawnDepth":1}`
+	if err := os.WriteFile(filepath.Join(subDir, "agent-"+agentID+".meta.json"), []byte(meta), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := ParseFile(parentPath, dir)
+	if err != nil {
+		t.Fatalf("ParseFile: %v", err)
+	}
+	if err := s.LoadSubagents(); err != nil {
+		t.Fatalf("LoadSubagents: %v", err)
+	}
+	if len(s.Subagents) != 1 {
+		t.Fatalf("expected 1 subagent, got %d", len(s.Subagents))
+	}
+	sa := s.Subagents[agentID]
+	if sa == nil {
+		t.Fatal("subagent missing")
+	}
+	if sa.AgentType != "Explore" {
+		t.Errorf("AgentType = %q, want Explore", sa.AgentType)
+	}
+	if sa.Description != "find the config file" {
+		t.Errorf("Description = %q", sa.Description)
+	}
+	// 300 + 200 input across two turns
+	if sa.Total.InputTokens != 500 {
+		t.Errorf("subagent input = %d, want 500", sa.Total.InputTokens)
+	}
+	if sa.AssistantTurns != 2 {
+		t.Errorf("subagent turns = %d, want 2", sa.AssistantTurns)
+	}
+	// parent totals unaffected by subagent
+	if s.Total.InputTokens != 10 {
+		t.Errorf("parent input = %d, want 10", s.Total.InputTokens)
+	}
+}
+
+func TestDiscoverSkipsSubagents(t *testing.T) {
+	dir := t.TempDir()
+	proj := filepath.Join(dir, "-proj")
+	sid := "sid-1"
+	os.MkdirAll(filepath.Join(proj, sid, "subagents"), 0o755)
+	os.WriteFile(filepath.Join(proj, sid+".jsonl"), []byte("{}"), 0o644)
+	os.WriteFile(filepath.Join(proj, sid, "subagents", "agent-aaa.jsonl"), []byte("{}"), 0o644)
+	os.WriteFile(filepath.Join(proj, sid, "subagents", "agent-aaa.meta.json"), []byte("{}"), 0o644)
+
+	files, err := Discover(dir)
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if len(files) != 1 {
+		t.Fatalf("expected 1 file (parent only), got %d: %v", len(files), files)
+	}
+	if !strings.HasSuffix(files[0], "sid-1.jsonl") {
+		t.Errorf("expected parent file, got %q", files[0])
 	}
 }

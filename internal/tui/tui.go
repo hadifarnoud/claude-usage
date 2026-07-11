@@ -636,13 +636,42 @@ func (m *Model) buildDetailText() {
 	fmt.Fprintf(&b, "    Input tokens:   %12d  ($%.4f)\n", r.TotalInput, r.TotalCost.Input)
 	fmt.Fprintf(&b, "    Cache writes:   %12d  ($%.4f)\n", r.TotalCacheW, r.TotalCost.CacheWrite)
 	fmt.Fprintf(&b, "    Cache reads:    %12d  ($%.4f)\n", r.TotalCacheR, r.TotalCost.CacheRead)
-	fmt.Fprintf(&b, "    Output tokens:  %12d  ($%.4f)\n\n", r.TotalOutput, r.TotalCost.Output)
-	fmt.Fprintf(&b, "%s\n", m.accentStyle.Render("  Per-Model Breakdown"))
+	fmt.Fprintf(&b, "    Output tokens:  %12d  ($%.4f)\n", r.TotalOutput, r.TotalCost.Output)
+	if r.SubagentCount > 0 {
+		fmt.Fprintf(&b, "    %s $%.4f across %d subagent(s)\n",
+			m.dimStyle.Render("incl. subagents:"), r.SubagentCost.Total, r.SubagentCount)
+	}
+	fmt.Fprintf(&b, "\n%s\n", m.accentStyle.Render("  Per-Model Breakdown"))
 	for _, mm := range r.Models {
 		fmt.Fprintf(&b, "\n  %s\n", mm.Model)
 		fmt.Fprintf(&b, "    input  %10d   cache-w %10d   cache-r %10d   output %10d\n", mm.Input, mm.CacheWrite, mm.CacheRead, mm.Output)
 		fmt.Fprintf(&b, "    cost: $%.4f (in $%.4f / cw $%.4f / cr $%.4f / out $%.4f)  turns %d\n",
 			mm.Cost.Total, mm.Cost.Input, mm.Cost.CacheWrite, mm.Cost.CacheRead, mm.Cost.Output, mm.Turns)
+	}
+	if r.SubagentCount > 0 {
+		fmt.Fprintf(&b, "\n%s\n", m.accentStyle.Render("  Subagents"))
+		fmt.Fprintf(&b, "  %d subagent(s)  \u2014  $%.4f total\n", r.SubagentCount, r.SubagentCost.Total)
+		// show most expensive first
+		subs := make([]report.SubagentRow, len(r.Subagents))
+		copy(subs, r.Subagents)
+		sort.Slice(subs, func(i, j int) bool { return subs[i].Cost.Total > subs[j].Cost.Total })
+		for _, sa := range subs {
+			fmt.Fprintf(&b, "\n  ")
+			label := sa.AgentType
+			if label == "" {
+				label = "subagent"
+			}
+			fmt.Fprintf(&b, "%s  (%d turns, $%.4f)\n", m.okStyle.Render(label), sa.Turns, sa.Cost.Total)
+			if sa.Description != "" {
+				for _, line := range wrapText(sa.Description, 74) {
+					fmt.Fprintf(&b, "    %s\n", m.dimStyle.Render(line))
+				}
+			}
+			for _, mm := range sa.Models {
+				fmt.Fprintf(&b, "    %-24s in %d  cw %d  cr %d  out %d\n",
+					mm.Model, mm.Input, mm.CacheWrite, mm.CacheRead, mm.Output)
+			}
+		}
 	}
 	m.detailText = b.String()
 	m.detail.SetContent(m.detailText)
