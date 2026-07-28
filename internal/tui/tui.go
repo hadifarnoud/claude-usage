@@ -649,19 +649,34 @@ func (m *Model) buildDetailText() {
 			mm.Cost.Total, mm.Cost.Input, mm.Cost.CacheWrite, mm.Cost.CacheRead, mm.Cost.Output, mm.Turns)
 	}
 	if r.SubagentCount > 0 {
-		fmt.Fprintf(&b, "\n%s\n", m.accentStyle.Render("  Subagents"))
-		fmt.Fprintf(&b, "  %d subagent(s)  \u2014  $%.4f total\n", r.SubagentCount, r.SubagentCost.Total)
-		// show most expensive first
-		subs := make([]report.SubagentRow, len(r.Subagents))
-		copy(subs, r.Subagents)
-		sort.Slice(subs, func(i, j int) bool { return subs[i].Cost.Total > subs[j].Cost.Total })
-		for _, sa := range subs {
-			fmt.Fprintf(&b, "\n  ")
-			label := sa.AgentType
-			if label == "" {
-				label = "subagent"
+		// Task-tool subagents render flat; workflow agents are grouped under
+		// the workflow run that spawned them.
+		var direct []report.SubagentRow
+		var wfOrder []string
+		wfRuns := make(map[string][]report.SubagentRow)
+		wfNames := make(map[string]string)
+		for _, sa := range r.Subagents {
+			if sa.WorkflowRunID == "" {
+				direct = append(direct, sa)
+				continue
 			}
-			fmt.Fprintf(&b, "%s  (%d turns, $%.4f)\n", m.okStyle.Render(label), sa.Turns, sa.Cost.Total)
+			if _, seen := wfRuns[sa.WorkflowRunID]; !seen {
+				wfOrder = append(wfOrder, sa.WorkflowRunID)
+				name := sa.WorkflowName
+				if name == "" {
+					name = sa.WorkflowRunID
+				}
+				wfNames[sa.WorkflowRunID] = name
+			}
+			wfRuns[sa.WorkflowRunID] = append(wfRuns[sa.WorkflowRunID], sa)
+		}
+
+		byCostDesc := func(rows []report.SubagentRow) {
+			sort.Slice(rows, func(i, j int) bool { return rows[i].Cost.Total > rows[j].Cost.Total })
+		}
+		writeRow := func(sa report.SubagentRow, label string) {
+			fmt.Fprintf(&b, "\n  %s  (%d turns, $%.4f)\n",
+				m.okStyle.Render(label), sa.Turns, sa.Cost.Total)
 			if sa.Description != "" {
 				for _, line := range wrapText(sa.Description, 74) {
 					fmt.Fprintf(&b, "    %s\n", m.dimStyle.Render(line))
@@ -670,6 +685,49 @@ func (m *Model) buildDetailText() {
 			for _, mm := range sa.Models {
 				fmt.Fprintf(&b, "    %-24s in %d  cw %d  cr %d  out %d\n",
 					mm.Model, mm.Input, mm.CacheWrite, mm.CacheRead, mm.Output)
+			}
+		}
+
+		fmt.Fprintf(&b, "\n%s\n", m.accentStyle.Render("  Subagents"))
+		summary := fmt.Sprintf("  %d subagent(s)  \u2014  $%.4f total", r.SubagentCount, r.SubagentCost.Total)
+		if len(wfOrder) > 0 {
+			summary += fmt.Sprintf("  (%d in %d workflow run(s))", r.SubagentCount-len(direct), len(wfOrder))
+		}
+		fmt.Fprintf(&b, "%s\n", summary)
+
+		byCostDesc(direct)
+		for _, sa := range direct {
+			label := sa.AgentType
+			if label == "" {
+				label = "subagent"
+			}
+			writeRow(sa, label)
+		}
+
+		for _, runID := range wfOrder {
+			rows := wfRuns[runID]
+			byCostDesc(rows)
+			var runCost float64
+			var runTurns int
+			for _, sa := range rows {
+				runCost += sa.Cost.Total
+				runTurns += sa.Turns
+			}
+			fmt.Fprintf(&b, "\n  %s  %s\n",
+				m.accentStyle.Render("workflow "+wfNames[runID]),
+				m.dimStyle.Render(fmt.Sprintf("%s \u2014 %d agent(s), %d turns, $%.4f", runID, len(rows), runTurns, runCost)))
+			for _, sa := range rows {
+				label := sa.Label
+				if label == "" {
+					label = sa.AgentType
+				}
+				if label == "" {
+					label = "workflow agent"
+				}
+				if sa.Phase != "" {
+					label = sa.Phase + " / " + label
+				}
+				writeRow(sa, label)
 			}
 		}
 	}
