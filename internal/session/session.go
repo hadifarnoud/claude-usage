@@ -40,18 +40,18 @@ type Message struct {
 
 // Line is a single JSONL record from a session transcript.
 type Line struct {
-	Type        string  `json:"type"`
-	Timestamp   string  `json:"timestamp"`
-	SessionID   string  `json:"sessionId"`
-	ParentUUID  *string `json:"parentUuid"`
-	IsSidechain bool    `json:"isSidechain"`
-	AgentID     string  `json:"agentId"`
-	Cwd         string  `json:"cwd"`
-	GitBranch   string  `json:"gitBranch"`
-	Version     string  `json:"version"`
-	Entrypoint  string  `json:"entrypoint"`
-	UserType    string  `json:"userType"`
-	Message     Message `json:"message"`
+	Type        string          `json:"type"`
+	Timestamp   string          `json:"timestamp"`
+	SessionID   string          `json:"sessionId"`
+	ParentUUID  *string         `json:"parentUuid"`
+	IsSidechain bool            `json:"isSidechain"`
+	AgentID     string          `json:"agentId"`
+	Cwd         string          `json:"cwd"`
+	GitBranch   string          `json:"gitBranch"`
+	Version     string          `json:"version"`
+	Entrypoint  string          `json:"entrypoint"`
+	UserType    string          `json:"userType"`
+	Message     Message         `json:"message"`
 	Summary     string          `json:"summary"`
 	LeafUUID    string          `json:"leafUuid"`
 	LastPrompt  string          `json:"lastPrompt"`
@@ -61,19 +61,19 @@ type Line struct {
 
 // Session is the fully aggregated view of one transcript file.
 type Session struct {
-	Path       string
-	SessionID  string
-	Title      string
+	Path        string
+	SessionID   string
+	Title       string
 	FirstPrompt string
-	Project    string
-	GitBranch  string
-	Cwd        string
-	Entrypoint string
-	Version    string
-	FirstSeen  time.Time
-	LastSeen   time.Time
-	Duration   time.Duration
-	Summary    string
+	Project     string
+	GitBranch   string
+	Cwd         string
+	Entrypoint  string
+	Version     string
+	FirstSeen   time.Time
+	LastSeen    time.Time
+	Duration    time.Duration
+	Summary     string
 
 	Models     map[string]*ModelUsage
 	Total      Usage
@@ -91,17 +91,30 @@ type Session struct {
 	IsSidechain    bool
 }
 
-// Subagent is the aggregated usage of one Task-tool dispatch.
+// Subagent is the aggregated usage of one Task-tool dispatch or one agent()
+// call inside a workflow run.
 type Subagent struct {
 	AgentID        string
 	AgentType      string // from agent-*.meta.json ("Explore", "general-purpose", ...)
-	Description    string // task prompt from agent-*.meta.json
+	Description    string // task prompt from agent-*.meta.json (or the workflow prompt preview)
 	Models         map[string]*ModelUsage
 	Total          Usage
 	AssistantTurns int
 	FirstSeen      time.Time
 	LastSeen       time.Time
+
+	// Workflow provenance. Non-empty only for agents spawned by the Workflow
+	// tool, whose transcripts live under subagents/workflows/{runId}/ and whose
+	// meta.json carries no description — the label and phase come from the
+	// run record in {sessionId}/workflows/{runId}.json instead.
+	WorkflowRunID string
+	WorkflowName  string
+	Label         string
+	Phase         string
 }
+
+// IsWorkflow reports whether this subagent was spawned by a workflow run.
+func (sa *Subagent) IsWorkflow() bool { return sa.WorkflowRunID != "" }
 
 // ModelUsage holds per-model aggregated counters.
 type ModelUsage struct {
@@ -312,29 +325,55 @@ type agentMeta struct {
 // this session. Subagents live under {project}/{sessionId}/subagents/ and are
 // not returned by Discover, so this must be called explicitly after Parse.
 // It is a no-op when the session has no subagents directory (or no SessionID).
+//
+// Two layouts are handled:
+//
+//	subagents/agent-{id}.jsonl                     — Task-tool dispatches
+//	subagents/workflows/{runId}/agent-{id}.jsonl   — Workflow-tool agent() calls
+//
+// so the tree is walked recursively rather than listed flat.
 func (s *Session) LoadSubagents() error {
 	if s.SessionID == "" || s.Path == "" {
 		return nil
 	}
-	dir := filepath.Join(filepath.Dir(s.Path), s.SessionID, "subagents")
-	entries, err := os.ReadDir(dir)
-	if err != nil {
+	base := filepath.Join(filepath.Dir(s.Path), s.SessionID)
+	dir := filepath.Join(base, "subagents")
+	if _, err := os.Stat(dir); err != nil {
 		if os.IsNotExist(err) {
 			return nil
 		}
 		return err
 	}
-	for _, e := range entries {
-		name := e.Name()
-		if !strings.HasPrefix(name, "agent-") || !strings.HasSuffix(name, ".jsonl") {
-			continue
+
+	// Workflow agents carry no description in their meta.json; their label,
+	// phase and prompt preview live in the run record instead.
+	runs := loadWorkflowRuns(filepath.Join(base, "workflows"))
+
+	return filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			// Walk reports a directory it could not read here. Skipping it
+			// would drop every agent inside and still report a clean load, so
+			// the caller would see a session whose cost is silently too low.
+			return fmt.Errorf("read subagents at %s: %w", path, err)
 		}
-		path := filepath.Join(dir, name)
+		if info == nil || info.IsDir() {
+			return nil
+		}
+		name := info.Name()
+		if !strings.HasPrefix(name, "agent-") || !strings.HasSuffix(name, ".jsonl") {
+			return nil
+		}
 		agentID := strings.TrimSuffix(strings.TrimPrefix(name, "agent-"), ".jsonl")
 
 		sa, err := parseSubagent(path, agentID)
 		if err != nil || sa == nil {
-			continue
+			return nil
+		}
+		if rel, err := filepath.Rel(dir, path); err == nil {
+			parts := strings.Split(filepath.ToSlash(rel), "/")
+			if len(parts) >= 3 && parts[0] == "workflows" {
+				applyWorkflowMeta(sa, parts[1], runs)
+			}
 		}
 		// Prefer an already-created bucket (from inline sidechain lines) so
 		// ordering is stable; otherwise register the freshly parsed one.
@@ -347,8 +386,84 @@ func (s *Session) LoadSubagents() error {
 			s.Subagents[agentID] = sa
 			s.SubagentOrder = append(s.SubagentOrder, agentID)
 		}
+		return nil
+	})
+}
+
+// workflowRun is the subset of {sessionId}/workflows/{runId}.json we need to
+// describe the agents a workflow spawned.
+type workflowRun struct {
+	RunID    string `json:"runId"`
+	Name     string `json:"workflowName"`
+	Summary  string `json:"summary"`
+	Progress []struct {
+		Type          string `json:"type"`
+		AgentID       string `json:"agentId"`
+		Label         string `json:"label"`
+		PhaseTitle    string `json:"phaseTitle"`
+		PromptPreview string `json:"promptPreview"`
+	} `json:"workflowProgress"`
+}
+
+// loadWorkflowRuns reads every workflow run record in dir, keyed by run id.
+// A missing or unreadable directory yields an empty map: workflow agents still
+// get counted, they just show up without a label.
+func loadWorkflowRuns(dir string) map[string]*workflowRun {
+	runs := make(map[string]*workflowRun)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return runs
 	}
-	return nil
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			continue
+		}
+		var run workflowRun
+		if json.Unmarshal(data, &run) != nil {
+			continue
+		}
+		// Index by both the file name and the record's own runId; the
+		// subagent directory is named after one of them.
+		if id := strings.TrimSuffix(e.Name(), ".json"); id != "" {
+			runs[id] = &run
+		}
+		if run.RunID != "" {
+			runs[run.RunID] = &run
+		}
+	}
+	return runs
+}
+
+// applyWorkflowMeta stamps workflow provenance onto a subagent parsed from
+// subagents/workflows/{runID}/.
+func applyWorkflowMeta(sa *Subagent, runID string, runs map[string]*workflowRun) {
+	sa.WorkflowRunID = runID
+	sa.WorkflowName = runID
+	run, ok := runs[runID]
+	if !ok {
+		return
+	}
+	if run.Name != "" {
+		sa.WorkflowName = run.Name
+	}
+	for _, p := range run.Progress {
+		if p.Type != "workflow_agent" || p.AgentID != sa.AgentID {
+			continue
+		}
+		sa.Label = p.Label
+		sa.Phase = p.PhaseTitle
+		if sa.Description == "" {
+			sa.Description = cleanTitle(p.PromptPreview)
+		}
+		break
+	}
+	if sa.Description == "" {
+		sa.Description = run.Summary
+	}
 }
 
 // parseSubagent reads one subagent transcript and its sibling .meta.json.

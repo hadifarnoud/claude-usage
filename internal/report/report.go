@@ -29,6 +29,12 @@ type SubagentRow struct {
 	Models      []ModelRow
 	Cost        pricing.Breakdown
 	Turns       int
+
+	// Workflow provenance, empty for plain Task-tool subagents.
+	WorkflowRunID string
+	WorkflowName  string
+	Label         string
+	Phase         string
 }
 
 // SessionReport is the cost view of a single session.
@@ -104,10 +110,14 @@ func FromSession(s *session.Session) SessionReport {
 	}
 	for _, sa := range s.SortedSubagents() {
 		row := SubagentRow{
-			AgentType:   sa.AgentType,
-			Description: sa.Description,
-			AgentID:     sa.AgentID,
-			Turns:       sa.AssistantTurns,
+			AgentType:     sa.AgentType,
+			Description:   sa.Description,
+			AgentID:       sa.AgentID,
+			Turns:         sa.AssistantTurns,
+			WorkflowRunID: sa.WorkflowRunID,
+			WorkflowName:  sa.WorkflowName,
+			Label:         sa.Label,
+			Phase:         sa.Phase,
 		}
 		for _, mm := range sortSubagentModels(sa.Models) {
 			cost := pricing.Cost(mm.Input, mm.Output, mm.CacheWrite, mm.CacheRead, mm.Model)

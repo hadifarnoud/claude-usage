@@ -1,6 +1,7 @@
 package session
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -225,6 +226,185 @@ func TestLoadSubagents(t *testing.T) {
 	// parent totals unaffected by subagent
 	if s.Total.InputTokens != 10 {
 		t.Errorf("parent input = %d, want 10", s.Total.InputTokens)
+	}
+}
+
+// Workflow-tool agents are stored one level deeper than Task-tool subagents
+// (subagents/workflows/{runId}/) and their meta.json carries no description —
+// the label and phase live in the run record under {sessionId}/workflows/.
+func TestLoadSubagentsWorkflow(t *testing.T) {
+	dir := t.TempDir()
+	proj := filepath.Join(dir, "-proj")
+	sid := "sid-wf"
+	runID := "wf_abc123"
+	if err := os.MkdirAll(proj, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	parentPath := filepath.Join(proj, sid+".jsonl")
+	parent := `{"type":"assistant","sessionId":"` + sid + `","message":{"model":"claude-sonnet-5","role":"assistant","usage":{"input_tokens":10,"output_tokens":5}}}
+`
+	if err := os.WriteFile(parentPath, []byte(parent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// one plain Task subagent + two workflow agents
+	subDir := filepath.Join(proj, sid, "subagents")
+	wfDir := filepath.Join(subDir, "workflows", runID)
+	if err := os.MkdirAll(wfDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write := func(path, body string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	turn := func(agentID, model string, in, out int) string {
+		return fmt.Sprintf(`{"type":"assistant","sessionId":%q,"isSidechain":true,"agentId":%q,"timestamp":"2026-01-01T10:00:00Z","message":{"model":%q,"role":"assistant","usage":{"input_tokens":%d,"output_tokens":%d}}}`+"\n",
+			sid, agentID, model, in, out)
+	}
+	write(filepath.Join(subDir, "agent-task1.jsonl"), turn("task1", "claude-sonnet-5", 100, 20))
+	write(filepath.Join(subDir, "agent-task1.meta.json"), `{"agentType":"Explore","description":"look around"}`)
+	write(filepath.Join(wfDir, "agent-wfa.jsonl"), turn("wfa", "claude-fable-5", 300, 40))
+	write(filepath.Join(wfDir, "agent-wfa.meta.json"), `{"agentType":"workflow-subagent","spawnDepth":1}`)
+	// second workflow agent is a stale retry the run record no longer lists
+	write(filepath.Join(wfDir, "agent-wfb.jsonl"), turn("wfb", "claude-fable-5", 50, 10))
+	write(filepath.Join(wfDir, "agent-wfb.meta.json"), `{"agentType":"workflow-subagent","spawnDepth":1}`)
+	// journal.jsonl must not be mistaken for an agent transcript
+	write(filepath.Join(wfDir, "journal.jsonl"), `{"type":"started","agentId":"wfa"}`+"\n")
+
+	runsDir := filepath.Join(proj, sid, "workflows")
+	if err := os.MkdirAll(runsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write(filepath.Join(runsDir, runID+".json"), `{"runId":"`+runID+`","workflowName":"review-changes","summary":"review the diff","workflowProgress":[{"type":"workflow_phase","index":1,"title":"Review"},{"type":"workflow_agent","agentId":"wfa","label":"review:bugs","phaseTitle":"Review","promptPreview":"Adversarially review\nthe diff"}]}`)
+
+	s, err := ParseFile(parentPath, dir)
+	if err != nil {
+		t.Fatalf("ParseFile: %v", err)
+	}
+	if err := s.LoadSubagents(); err != nil {
+		t.Fatalf("LoadSubagents: %v", err)
+	}
+	if len(s.Subagents) != 3 {
+		t.Fatalf("expected 3 subagents (1 task + 2 workflow), got %d", len(s.Subagents))
+	}
+
+	if task := s.Subagents["task1"]; task == nil || task.IsWorkflow() {
+		t.Errorf("task subagent should not be marked as workflow: %+v", task)
+	}
+
+	wfa := s.Subagents["wfa"]
+	if wfa == nil {
+		t.Fatal("workflow agent wfa missing")
+	}
+	if !wfa.IsWorkflow() || wfa.WorkflowRunID != runID {
+		t.Errorf("WorkflowRunID = %q, want %q", wfa.WorkflowRunID, runID)
+	}
+	if wfa.WorkflowName != "review-changes" {
+		t.Errorf("WorkflowName = %q, want review-changes", wfa.WorkflowName)
+	}
+	if wfa.Label != "review:bugs" || wfa.Phase != "Review" {
+		t.Errorf("label/phase = %q/%q, want review:bugs/Review", wfa.Label, wfa.Phase)
+	}
+	// no meta description, so the run's prompt preview fills in (whitespace collapsed)
+	if wfa.Description != "Adversarially review the diff" {
+		t.Errorf("Description = %q", wfa.Description)
+	}
+	if wfa.Total.InputTokens != 300 || wfa.AssistantTurns != 1 {
+		t.Errorf("wfa usage = %+v turns=%d", wfa.Total, wfa.AssistantTurns)
+	}
+
+	// a stale agent absent from the run record still counts, falling back to
+	// the run name and summary
+	wfb := s.Subagents["wfb"]
+	if wfb == nil {
+		t.Fatal("workflow agent wfb missing")
+	}
+	if wfb.WorkflowName != "review-changes" || wfb.Label != "" {
+		t.Errorf("wfb = name %q label %q", wfb.WorkflowName, wfb.Label)
+	}
+	if wfb.Description != "review the diff" {
+		t.Errorf("wfb Description = %q, want run summary", wfb.Description)
+	}
+
+	// parent totals stay clean
+	if s.Total.InputTokens != 10 {
+		t.Errorf("parent input = %d, want 10", s.Total.InputTokens)
+	}
+}
+
+// A workflow run with no run record at all must still have its agents counted.
+func TestLoadSubagentsWorkflowMissingRunRecord(t *testing.T) {
+	dir := t.TempDir()
+	proj := filepath.Join(dir, "-proj")
+	sid := "sid-wf2"
+	wfDir := filepath.Join(proj, sid, "subagents", "workflows", "wf_orphan")
+	if err := os.MkdirAll(wfDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	parentPath := filepath.Join(proj, sid+".jsonl")
+	if err := os.WriteFile(parentPath, []byte(`{"type":"assistant","sessionId":"`+sid+`","message":{"model":"claude-sonnet-5","role":"assistant","usage":{"input_tokens":10,"output_tokens":5}}}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	body := fmt.Sprintf(`{"type":"assistant","sessionId":%q,"isSidechain":true,"agentId":"orphan","message":{"model":"claude-fable-5","role":"assistant","usage":{"input_tokens":700,"output_tokens":90}}}`+"\n", sid)
+	if err := os.WriteFile(filepath.Join(wfDir, "agent-orphan.jsonl"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := ParseFile(parentPath, dir)
+	if err != nil {
+		t.Fatalf("ParseFile: %v", err)
+	}
+	if err := s.LoadSubagents(); err != nil {
+		t.Fatalf("LoadSubagents: %v", err)
+	}
+	sa := s.Subagents["orphan"]
+	if sa == nil {
+		t.Fatal("orphan workflow agent missing")
+	}
+	if sa.WorkflowRunID != "wf_orphan" || sa.WorkflowName != "wf_orphan" {
+		t.Errorf("run id/name = %q/%q", sa.WorkflowRunID, sa.WorkflowName)
+	}
+	if sa.Total.InputTokens != 700 {
+		t.Errorf("input = %d, want 700", sa.Total.InputTokens)
+	}
+}
+
+// An unreadable directory inside the subagents tree must surface as an error.
+// Swallowing it would report a clean load for a session whose cost is silently
+// missing every agent under that directory.
+func TestLoadSubagentsReportsUnreadableDir(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	dir := t.TempDir()
+	proj := filepath.Join(dir, "-proj")
+	sid := "sid-perm"
+	wfDir := filepath.Join(proj, sid, "subagents", "workflows", "wf_locked")
+	if err := os.MkdirAll(wfDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	parentPath := filepath.Join(proj, sid+".jsonl")
+	if err := os.WriteFile(parentPath, []byte(`{"type":"assistant","sessionId":"`+sid+`","message":{"model":"claude-sonnet-5","role":"assistant","usage":{"input_tokens":10,"output_tokens":5}}}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	body := fmt.Sprintf(`{"type":"assistant","sessionId":%q,"isSidechain":true,"agentId":"locked","message":{"model":"claude-fable-5","role":"assistant","usage":{"input_tokens":700,"output_tokens":90}}}`+"\n", sid)
+	if err := os.WriteFile(filepath.Join(wfDir, "agent-locked.jsonl"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(wfDir, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	// Restore the mode so t.TempDir can clean up.
+	t.Cleanup(func() { _ = os.Chmod(wfDir, 0o755) })
+
+	s, err := ParseFile(parentPath, dir)
+	if err != nil {
+		t.Fatalf("ParseFile: %v", err)
+	}
+	if err := s.LoadSubagents(); err == nil {
+		t.Fatal("LoadSubagents returned nil for an unreadable subagents directory")
 	}
 }
 
