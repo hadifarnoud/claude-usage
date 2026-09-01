@@ -40,18 +40,18 @@ type Message struct {
 
 // Line is a single JSONL record from a session transcript.
 type Line struct {
-	Type        string  `json:"type"`
-	Timestamp   string  `json:"timestamp"`
-	SessionID   string  `json:"sessionId"`
-	ParentUUID  *string `json:"parentUuid"`
-	IsSidechain bool    `json:"isSidechain"`
-	AgentID     string  `json:"agentId"`
-	Cwd         string  `json:"cwd"`
-	GitBranch   string  `json:"gitBranch"`
-	Version     string  `json:"version"`
-	Entrypoint  string  `json:"entrypoint"`
-	UserType    string  `json:"userType"`
-	Message     Message `json:"message"`
+	Type        string          `json:"type"`
+	Timestamp   string          `json:"timestamp"`
+	SessionID   string          `json:"sessionId"`
+	ParentUUID  *string         `json:"parentUuid"`
+	IsSidechain bool            `json:"isSidechain"`
+	AgentID     string          `json:"agentId"`
+	Cwd         string          `json:"cwd"`
+	GitBranch   string          `json:"gitBranch"`
+	Version     string          `json:"version"`
+	Entrypoint  string          `json:"entrypoint"`
+	UserType    string          `json:"userType"`
+	Message     Message         `json:"message"`
 	Summary     string          `json:"summary"`
 	LeafUUID    string          `json:"leafUuid"`
 	LastPrompt  string          `json:"lastPrompt"`
@@ -61,19 +61,19 @@ type Line struct {
 
 // Session is the fully aggregated view of one transcript file.
 type Session struct {
-	Path       string
-	SessionID  string
-	Title      string
+	Path        string
+	SessionID   string
+	Title       string
 	FirstPrompt string
-	Project    string
-	GitBranch  string
-	Cwd        string
-	Entrypoint string
-	Version    string
-	FirstSeen  time.Time
-	LastSeen   time.Time
-	Duration   time.Duration
-	Summary    string
+	Project     string
+	GitBranch   string
+	Cwd         string
+	Entrypoint  string
+	Version     string
+	FirstSeen   time.Time
+	LastSeen    time.Time
+	Duration    time.Duration
+	Summary     string
 
 	Models     map[string]*ModelUsage
 	Total      Usage
@@ -350,7 +350,13 @@ func (s *Session) LoadSubagents() error {
 	runs := loadWorkflowRuns(filepath.Join(base, "workflows"))
 
 	return filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
-		if err != nil || info == nil || info.IsDir() {
+		if err != nil {
+			// Walk reports a directory it could not read here. Skipping it
+			// would drop every agent inside and still report a clean load, so
+			// the caller would see a session whose cost is silently too low.
+			return fmt.Errorf("read subagents at %s: %w", path, err)
+		}
+		if info == nil || info.IsDir() {
 			return nil
 		}
 		name := info.Name()

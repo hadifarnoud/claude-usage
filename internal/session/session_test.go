@@ -371,6 +371,43 @@ func TestLoadSubagentsWorkflowMissingRunRecord(t *testing.T) {
 	}
 }
 
+// An unreadable directory inside the subagents tree must surface as an error.
+// Swallowing it would report a clean load for a session whose cost is silently
+// missing every agent under that directory.
+func TestLoadSubagentsReportsUnreadableDir(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	dir := t.TempDir()
+	proj := filepath.Join(dir, "-proj")
+	sid := "sid-perm"
+	wfDir := filepath.Join(proj, sid, "subagents", "workflows", "wf_locked")
+	if err := os.MkdirAll(wfDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	parentPath := filepath.Join(proj, sid+".jsonl")
+	if err := os.WriteFile(parentPath, []byte(`{"type":"assistant","sessionId":"`+sid+`","message":{"model":"claude-sonnet-5","role":"assistant","usage":{"input_tokens":10,"output_tokens":5}}}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	body := fmt.Sprintf(`{"type":"assistant","sessionId":%q,"isSidechain":true,"agentId":"locked","message":{"model":"claude-fable-5","role":"assistant","usage":{"input_tokens":700,"output_tokens":90}}}`+"\n", sid)
+	if err := os.WriteFile(filepath.Join(wfDir, "agent-locked.jsonl"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(wfDir, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	// Restore the mode so t.TempDir can clean up.
+	t.Cleanup(func() { _ = os.Chmod(wfDir, 0o755) })
+
+	s, err := ParseFile(parentPath, dir)
+	if err != nil {
+		t.Fatalf("ParseFile: %v", err)
+	}
+	if err := s.LoadSubagents(); err == nil {
+		t.Fatal("LoadSubagents returned nil for an unreadable subagents directory")
+	}
+}
+
 func TestDiscoverSkipsSubagents(t *testing.T) {
 	dir := t.TempDir()
 	proj := filepath.Join(dir, "-proj")
