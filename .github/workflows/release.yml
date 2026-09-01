@@ -1,0 +1,78 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag to build and publish (for example v1.2.0)
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish binaries
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          check-latest: true
+
+      - name: Test
+        run: go test ./...
+
+      # The TUI has no cgo dependencies, so one Linux runner cross-compiles
+      # every target. CGO_ENABLED=0 keeps the binaries fully static.
+      - name: Build all targets
+        env:
+          CGO_ENABLED: "0"
+          VERSION: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          targets="darwin/arm64 darwin/amd64 windows/amd64 windows/arm64 linux/amd64 linux/arm64"
+          for target in $targets; do
+            goos="${target%/*}"
+            goarch="${target#*/}"
+            name="claude-usage_${VERSION}_${goos}_${goarch}"
+            out="dist/${name}/claude-usage"
+            if [ "$goos" = "windows" ]; then out="${out}.exe"; fi
+            mkdir -p "dist/${name}"
+            echo "building ${target}"
+            GOOS="$goos" GOARCH="$goarch" go build \
+              -trimpath \
+              -ldflags "-s -w -X main.version=${VERSION}" \
+              -o "$out" ./cmd/claude-usage
+            cp README.md "dist/${name}/"
+            if [ "$goos" = "windows" ]; then
+              (cd dist && zip -qr "${name}.zip" "${name}")
+            else
+              (cd dist && tar -czf "${name}.tar.gz" "${name}")
+            fi
+            rm -rf "dist/${name}"
+          done
+          (cd dist && sha256sum claude-usage_* > checksums.txt)
+          ls -la dist
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          if gh release view "$VERSION" >/dev/null 2>&1; then
+            gh release upload "$VERSION" dist/* --clobber
+          else
+            gh release create "$VERSION" dist/* \
+              --title "$VERSION" \
+              --generate-notes
+          fi
