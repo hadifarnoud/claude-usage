@@ -363,20 +363,34 @@ const htmlScript = `<script>
   }
 
   function subagentTable(subs) {
+    // The workflow column only earns its width when a workflow spawned some
+    // of these agents; plain Task-tool dispatches have no provenance.
+    var hasWorkflow = subs.some(function (sa) { return !!sa.workflow; });
+    var heads = ["Agent"];
+    if (hasWorkflow) heads.push("Workflow");
+    heads = heads.concat(["Models", "Turns", "Cost"]);
+
     var tbl = el("table");
     var thead = el("thead");
     var hr = el("tr");
-    ["Agent", "Models", "Turns", "Cost"].forEach(function (h, i) {
-      hr.appendChild(el("th", i >= 2 ? "num" : null, h));
+    heads.forEach(function (h) {
+      hr.appendChild(el("th", (h === "Turns" || h === "Cost") ? "num" : null, h));
     });
     thead.appendChild(hr);
     tbl.appendChild(thead);
+
     var tb = el("tbody");
     subs.forEach(function (sa) {
       var tr = el("tr");
-      var td = el("td", "agent", sa.agentType || "agent");
+      var td = el("td", "agent", sa.label || sa.agentType || "agent");
       if (sa.description) td.appendChild(el("span", "desc", sa.description));
       tr.appendChild(td);
+      if (hasWorkflow) {
+        var wf = [];
+        if (sa.workflow) wf.push(sa.workflow);
+        if (sa.phase) wf.push(sa.phase);
+        tr.appendChild(el("td", "agent", wf.join(" · ") || "—"));
+      }
       tr.appendChild(el("td", null, (sa.models || []).map(function (m) {
         return shortModel(m.model);
       }).join(", ")));

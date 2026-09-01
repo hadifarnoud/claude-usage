@@ -83,6 +83,11 @@ type htmlSubagent struct {
 	Cost        float64     `json:"cost"`
 	Turns       int         `json:"turns"`
 	Models      []htmlModel `json:"models"`
+
+	// Workflow provenance, empty for plain Task-tool subagents.
+	Workflow string `json:"workflow,omitempty"`
+	Phase    string `json:"phase,omitempty"`
+	Label    string `json:"label,omitempty"`
 }
 
 // buildPayload converts reports and their aggregate into the export document.
@@ -141,9 +146,12 @@ func buildPayload(reports []SessionReport, agg *Aggregate) htmlPayload {
 		for _, sa := range r.Subagents {
 			row := htmlSubagent{
 				AgentType:   sa.AgentType,
-				Description: sa.Description,
+				Description: clean(sa.Description, 160),
 				Cost:        sa.Cost.Total,
 				Turns:       sa.Turns,
+				Workflow:    sa.WorkflowName,
+				Phase:       sa.Phase,
+				Label:       clean(sa.Label, 80),
 			}
 			for _, m := range sa.Models {
 				row.Models = append(row.Models, toHTMLModel(m))
