@@ -1,3 +1,5 @@
-claude-usage
+# Built binary at the repo root only — not the cmd/claude-usage source dir.
+/claude-usage
+/dist/
 *.exe
 .DS_Store
