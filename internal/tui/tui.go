@@ -4,6 +4,8 @@ package tui
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -105,10 +107,10 @@ type Model struct {
 	width, height int
 	active        View
 	tables        map[View]table.Model
-	detail       viewport.Model
-	detailText   string
-	showDetail   bool
-	ready        bool
+	detail        viewport.Model
+	detailText    string
+	showDetail    bool
+	ready         bool
 
 	refreshing bool
 	spinner    spinner.Model
@@ -119,6 +121,10 @@ type Model struct {
 
 	sortBy    sortMode   // sessions table ordering: by cost (default) or time
 	timeRange timeFilter // sessions table activity window
+
+	// notice is a transient one-line message shown in the footer, e.g. the
+	// path an HTML export was written to.
+	notice string
 
 	// styles
 	titleStyle    lipgloss.Style
@@ -493,6 +499,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
+		// Any key other than the export key clears a stale export notice.
+		if msg.String() != "e" {
+			m.notice = ""
+		}
 		switch msg.String() {
 		case "ctrl+c", "q":
 			if m.showDetail {
@@ -533,38 +543,44 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.active = View(len(views) - 1)
 			}
 			return m, nil
-			case "1", "2", "3", "4":
-				idx := int(msg.String()[0] - '1')
-				if idx < len(views) {
-					m.active = views[idx]
-				}
+		case "1", "2", "3", "4":
+			idx := int(msg.String()[0] - '1')
+			if idx < len(views) {
+				m.active = views[idx]
+			}
+			return m, nil
+		case "s":
+			if m.showDetail {
 				return m, nil
-			case "s":
-				if m.showDetail {
-					return m, nil
-				}
-				if m.sortBy == sortByCost {
-					m.sortBy = sortByTime
-				} else {
-					m.sortBy = sortByCost
-				}
-				m.rebuildSessions()
+			}
+			if m.sortBy == sortByCost {
+				m.sortBy = sortByTime
+			} else {
+				m.sortBy = sortByCost
+			}
+			m.rebuildSessions()
+			return m, nil
+		case "e":
+			if m.showDetail {
 				return m, nil
-			case "f":
-				if m.showDetail {
-					return m, nil
-				}
-				switch m.timeRange {
-				case filterAll:
-					m.timeRange = filter24h
-				case filter24h:
-					m.timeRange = filter7d
-				case filter7d:
-					m.timeRange = filterAll
-				}
-				m.cursorRow = 0
-				m.tables[ViewSessions] = m.buildSessionsTable()
+			}
+			m.notice = m.exportHTML()
+			return m, nil
+		case "f":
+			if m.showDetail {
 				return m, nil
+			}
+			switch m.timeRange {
+			case filterAll:
+				m.timeRange = filter24h
+			case filter24h:
+				m.timeRange = filter7d
+			case filter7d:
+				m.timeRange = filterAll
+			}
+			m.cursorRow = 0
+			m.tables[ViewSessions] = m.buildSessionsTable()
+			return m, nil
 		}
 	}
 
@@ -814,9 +830,28 @@ func (m Model) footerView() string {
 	if m.interval > 0 {
 		auto = "  \u2014  auto-refresh " + m.interval.String()
 	}
-	return m.dimStyle.Render("  [tab/1-4] views  [s] sort: "+m.sortBy.String()+
-		"  [f] time: "+m.timeRange.String()+
-		"  [enter] detail  [r] refresh now  [q] quit"+auto)
+	keys := m.dimStyle.Render("  [tab/1-4] views  [s] sort: " + m.sortBy.String() +
+		"  [f] time: " + m.timeRange.String() +
+		"  [enter] detail  [e] export HTML  [r] refresh now  [q] quit" + auto)
+	if m.notice != "" {
+		return keys + "\n" + m.okStyle.Render("  "+m.notice)
+	}
+	return keys
+}
+
+// exportHTML writes a self-contained HTML report next to the user's home
+// directory and returns a one-line status for the footer.
+func (m Model) exportHTML() string {
+	name := fmt.Sprintf("claude-usage-%s.html", time.Now().Format("2006-01-02-150405"))
+	dir, err := os.Getwd()
+	if err != nil {
+		dir = "."
+	}
+	path := filepath.Join(dir, name)
+	if err := report.WriteHTML(m.reports, m.aggregate, path); err != nil {
+		return "export failed: " + err.Error()
+	}
+	return "exported " + path
 }
 
 // Run launches the TUI.
